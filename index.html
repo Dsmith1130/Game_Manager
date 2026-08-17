@@ -14,6 +14,14 @@ h1{font-size:1.25rem;margin:0}.clock{font-size:2rem;font-variant-numeric:tabular
 .controls{display:flex;gap:7px;flex-wrap:wrap}.primary{background:var(--green);color:white}.secondary{background:#dfe9e3}.danger{background:#fee4e2;color:var(--danger)}
 .tabs{display:flex;gap:6px;margin:12px 0}.tab{background:#dfe9e3}.tab.active{background:var(--green);color:#fff}
 .panel{background:var(--card);border-radius:16px;padding:12px;box-shadow:0 2px 12px #0000000c;margin-bottom:12px}
+/* Live layout: show field and roster side-by-side on wider screens */
+#live{display:grid;grid-template-columns:1fr 320px;gap:10px}
+/* Make top control buttons smaller on narrow screens */
+@media(max-width:650px){
+  .controls button{padding:6px 8px;font-size:0.85rem;border-radius:8px}
+  .tabs{overflow:auto}
+  #live{grid-template-columns:1fr}
+}
 .field-wrap{display:flex;justify-content:center}.field{position:relative;width:min(900px,100%);aspect-ratio:0.75;background:#258548;border-radius:12px;overflow:hidden;border:3px solid white;box-shadow:0 2px 10px #0003}
 .field:before{content:"";position:absolute;left:0;right:0;top:50%;height:2px;background:#fff;transform:translateY(-50%)}
 .field:after{content:"";position:absolute;width:18%;aspect-ratio:1;border:2px solid #fff;border-radius:50%;left:41%;top:50%;transform:translateY(-50%)}
@@ -46,8 +54,14 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}th,td{padding:7px;bor
     <div class="clock" id="clock">25:00</div>
     <div class="controls">
       <button class="primary" id="startBtn">▶ Start</button><button class="secondary" id="pauseBtn">⏸ Pause</button>
-      <button class="secondary" id="resetBtn">↺ Reset Half</button><button class="primary" id="halfBtn">2nd Half</button>
-    </div>
+          <button class="secondary" id="resetBtn">↺ Reset Period</button><button class="primary" id="halfBtn">Next Period</button>
+          <select id="timePreset" title="Match time preset" style="border-radius:8px;padding:6px 8px">
+            <option value="8-9">8-9 (2×25m)</option>
+            <option value="10-11">10-11 (2×30m)</option>
+            <option value="6-7">6-7 (4×12m)</option>
+          </select>
+          <button class="danger" id="newGameBtn">🆕 New Game</button>
+        </div>
   </div>
   <div class="tabs">
     <button class="tab active" data-tab="live">Live Field</button><button class="tab" data-tab="subs">Next Subs</button>
@@ -75,8 +89,16 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}th,td{padding:7px;bor
 
   <section id="team" class="tabpane hidden">
     <div class="panel"><h2>Team</h2><div class="small">Edit names/numbers. Data is saved automatically on this device.</div><div id="teamEditor"></div>
-    <div class="controls" style="margin-top:10px"><button class="primary" id="saveTeam">Save Team</button><button class="secondary" id="exportBtn">Export Game</button><button class="secondary" id="importBtn">Import Game</button><input id="importFile" type="file" accept=".json" class="hidden"></div></div>
+    <div class="controls" style="margin-top:10px"><button class="primary" id="saveTeam">Save Team</button><button class="secondary" id="exportBtn">Export Game</button><button class="secondary" id="importBtn">Import Game</button><button class="secondary" id="saveRosterBtn">💾 Save Roster</button><button class="secondary" id="loadRosterBtn">📂 Load Roster</button><input id="importFile" type="file" accept=".json" class="hidden"></div></div>
   </section>
+</div>
+
+<div id="rosterModal" class="modal hidden">
+  <div class="modal-content">
+    <h3>Saved Rosters</h3>
+    <div id="rosterList" class="small" style="max-height:240px;overflow:auto;margin-bottom:8px"></div>
+    <div style="display:flex;gap:8px"><button id="closeRosterModal" class="secondary">Close</button></div>
+  </div>
 </div>
 
 <div id="playerModal" class="modal hidden">
@@ -94,7 +116,7 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}th,td{padding:7px;bor
 <script src="https://www.gstatic.com/firebasejs/10.7.2/firebase-database-compat.js"></script>
 <script>
 const POS=[["F1","FWD"],["F2","FWD"],["F3","FWD"],["F4","FWD"],["M","MID"],["D1","DEF"],["D2","DEF"],["D3","DEF"],["GK","GK"]];
-let currentPlayer=null,currentPos=null;
+let currentPlayer=null,currentPos=null;let editingTeam=false; // true while user is editing team inputs
 const defaultPlayers=["Alex","Ben","Charlie","Dylan","Evan","Finn","Gavin","Henry","Isaac","Jack","Kai","Liam","Mason","Noah","Owen","Parker","Quinn","Ryan"];
 
 // Firebase Config
@@ -111,13 +133,23 @@ async function initState(){
    const snapshot=await db.ref("gameState").once("value");
    state=snapshot.val()||{
      players:defaultPlayers.map((name,i)=>({id:"p"+i,name,num:i+1,goals:0,assists:0,segments:[],activePos:null})),
-     lineup:{}, planned:{}, half:1, remaining:1500, running:false, events:[]
+     lineup:{}, planned:{}, half:1, periods:2, periodSeconds:1500, remaining:1500, running:false, events:[]
    };
+   ensureStateDefaults();
    // Listen for real-time updates
    db.ref("gameState").on("value",snapshot=>{
      const newState=snapshot.val();
+     // If the user is actively editing the team roster, avoid overwriting their inputs with remote updates.
+     const active = typeof document !== 'undefined' && document.activeElement;
+     if(editingTeam || (active && active.closest && active.closest('#teamEditor'))) {
+       // skip replacing state while editing to avoid losing in-progress edits
+       return;
+     }
+     // If currently performing a local save, skip applying the incoming snapshot to avoid a race.
+     if(syncing) return;
      if(newState&&JSON.stringify(newState)!==JSON.stringify(state)){
        state=newState;
+       ensureStateDefaults();
        if(!syncing)render();
      }
    });
@@ -125,7 +157,8 @@ async function initState(){
    render();
  }catch(e){
    console.error("Firebase error:",e);
-   state={players:defaultPlayers.map((name,i)=>({id:"p"+i,name,num:i+1,goals:0,assists:0,segments:[],activePos:null})),lineup:{},planned:{},half:1,remaining:1500,running:false,events:[]};
+   state={players:defaultPlayers.map((name,i)=>({id:"p"+i,name,num:i+1,goals:0,assists:0,segments:[],activePos:null})),lineup:{},planned:{},half:1,periods:2,periodSeconds:1500,remaining:1500,running:false,events:[]};
+   ensureStateDefaults();
    render();
  }
 }
@@ -142,6 +175,13 @@ const save=async()=>{
  }
 };
 const fmt=s=>`${String(Math.floor(Math.max(0,s)/60)).padStart(2,"0")}:${String(Math.max(0,s)%60).padStart(2,"0")}`;
+function periodLabel(n, total){
+  if(total===4){
+    const ord=["1st","2nd","3rd","4th"]; return `${ord[n-1]} Quarter`;
+  }
+  if(total===2){ return `${n===1?"1st":"2nd"} Half`; }
+  return `Period ${n}`;
+}
 const pname=id=>{let p=state.players.find(x=>x.id===id);return p?`#${p.num} ${p.name}`:"—"};
 function showPlayerModal(p){
  document.getElementById("modalTitle").textContent=`${p.num} ${p.name}`;
@@ -152,13 +192,29 @@ function closePlayerModal(){
  currentPlayer=null;currentPos=null;
 }
 function render(){
- document.getElementById("clock").textContent=fmt(state.remaining);
- document.getElementById("halfLabel").textContent=`${state.half===1?"1st":"2nd"} Half · ${fmt(state.remaining)}`;
+ ensureStateDefaults();
+ // Update time preset select to reflect current state
+ const tp = document.getElementById('timePreset');
+ if(tp){
+   if(state.periods===4 && state.periodSeconds===12*60) tp.value='6-7';
+   else if(state.periods===2 && state.periodSeconds===25*60) tp.value='8-9';
+   else if(state.periods===2 && state.periodSeconds===30*60) tp.value='10-11';
+ }
+ // Show countdown until 0, then show overtime as +MM:SS
+ document.getElementById("clock").textContent = state.remaining > 0 ? fmt(state.remaining) : `+${fmt(state.overtime||0)}`;
+ document.getElementById("halfLabel").textContent = `${periodLabel(state.half||1,state.periods||2)} · ${state.remaining>0?fmt(state.remaining):"+"+fmt(state.overtime||0)}`;
  renderField();renderBench();renderSubs();renderReport();renderTeam();save();
 }
+function getPlayerStats(id){
+ let goals=0,assists=0;
+ (state.events||[]).forEach(ev=>{if(ev.id===id){if(ev.type==="goal")goals++;if(ev.type==="assist")assists++}});
+ return {goals,assists};
+}
+
 function playerCard(p, pos, active=false){
+ let stats = getPlayerStats(p.id);
  let d=document.createElement("div");d.className="player"+(active?" active":"");d.draggable=true;d.dataset.id=p.id;
- d.innerHTML=`<div class="num">#${p.num} ${p.name}</div><div class="stat">${pos||p.activePos||"Bench"}</div><div class="stat">⚽ ${p.goals} · 👟 ${p.assists}</div>`;
+ d.innerHTML=`<div class="num">#${p.num} ${p.name}</div><div class="stat">${pos||p.activePos||"Bench"}</div><div class="stat">⚽ ${stats.goals} · 👟 ${stats.assists}</div>`;
  d.addEventListener("dragstart",e=>e.dataTransfer.setData("text/plain",p.id));
  d.addEventListener("click",e=>{
    if(e.target.closest("button"))return;
@@ -170,16 +226,21 @@ function renderField(){
  const f=document.getElementById("field");f.querySelectorAll(".slot").forEach(x=>x.remove());
  POS.forEach(([code,label])=>{
    let s=document.createElement("div");s.className="slot";s.dataset.pos=code;s.dataset.label=label;
-   let id=state.lineup[code];let p=state.players.find(x=>x.id===id);
+   let id=state.lineup[code];
+   // Try to find the player by id, or fallback to matching by number or name if necessary
+   let p=state.players.find(x=>x.id===id) || state.players.find(x=>String(x.num)===String(id)) || state.players.find(x=>x.name===id);
    s.innerHTML="";
-   if(p)s.appendChild(playerCard(p,label,true));else{s.innerHTML=`<div class="empty">${label}<br>Drop player</div>`}
+   if(p) s.appendChild(playerCard(p,label,true)); else { s.innerHTML=`<div class="empty">${label}<br>Drop player</div>` }
    s.addEventListener("dragover",e=>e.preventDefault());
    s.addEventListener("drop",e=>{e.preventDefault();assign(code,e.dataTransfer.getData("text/plain"));});
    f.appendChild(s);
  });
 }
 function assign(pos,id){
- if(!id)return;
+ if(id===null||id===undefined||id==='')return;
+ // Normalize id: tolerate numeric ids or numbers by matching player.num or name.
+ let target = state.players.find(p=>p.id===id || String(p.num)===String(id) || p.name===id);
+ if(target) id = target.id;
  Object.keys(state.lineup).forEach(k=>{if(state.lineup[k]===id)delete state.lineup[k]});
  let old=state.players.find(p=>p.id===id)?.activePos;
  if(old===pos)return;
@@ -190,27 +251,87 @@ function assign(pos,id){
 }
 function startSegment(p,pos){p.segments.push({half:state.half,pos,start:elapsed()})}
 function closeSegment(p){let seg=p.segments[p.segments.length-1];if(seg&&!seg.end)seg.end=elapsed()}
-function elapsed(){return 1500-state.remaining}
-function record(type,id,pos){state.events.push({t:elapsed(),half:state.half,type,id,pos});}
+function elapsed(){
+  // elapsed match time in seconds (include completed periods and overtime)
+  const periodsCompleted = Math.max(0, (state.half||1) - 1);
+  const base = (periodsCompleted * (state.periodSeconds||1500)) + ((state.periodSeconds||1500) - (state.remaining||0));
+  const ot = state.overtime || 0;
+  return Math.max(0, base + ot);
+}
+function ensureStateDefaults(){
+  if(!state){
+    state={players:defaultPlayers.map((name,i)=>({id:"p"+i,name,num:i+1,goals:0,assists:0,segments:[],activePos:null})),lineup:{},planned:{},half:1,periods:2,periodSeconds:1500,remaining:1500,running:false,events:[]};
+  }
+  state.lineup = state.lineup || {};
+  state.planned = state.planned || {};
+  state.players = state.players || [];
+  state.events = state.events || [];
+  state.half = state.half || 1;
+  state.periods = state.periods || 2;
+  state.periodSeconds = typeof state.periodSeconds === 'number' ? state.periodSeconds : 1500;
+  state.remaining = typeof state.remaining === 'number' ? state.remaining : state.periodSeconds;
+  state.overtime = typeof state.overtime === 'number' ? state.overtime : 0;
+  state.running = !!state.running;
+  state.players.forEach(p=>{p.segments = p.segments || []; p.goals = p.goals || 0; p.assists = p.assists || 0; if(!('activePos' in p)) p.activePos=null;});
+}
+function record(type,id,pos){
+  // Single source of truth: record events only. Stats are derived from events when rendering.
+  const ev = {t:elapsed(),half:state.half,type,id,pos};
+  state.events.push(ev);
+}
 function renderBench(){
  let b=document.getElementById("bench");b.innerHTML="";
  state.players.filter(p=>!Object.values(state.lineup).includes(p.id)).forEach(p=>b.appendChild(playerCard(p)));
 }
 function renderSubs(){
+ // Avoid re-rendering while the user is interacting with a select dropdown (prevents it from closing immediately).
+ const active = document.activeElement;
+ if(active && active.tagName === 'SELECT' && active.closest && active.closest('#subGrid')){
+   // leave the current DOM intact while the user chooses an option
+   return;
+ }
  let g=document.getElementById("subGrid");g.innerHTML="";
  POS.forEach(([code,label])=>{
    let row=document.createElement("div");row.className="row";
    let cur=state.lineup[code];row.innerHTML=`<b>${label}</b>`;
    let sel=document.createElement("select");sel.dataset.pos=code;
-   state.players.forEach(p=>{let o=document.createElement("option");o.value=p.id;o.textContent=`#${p.num} ${p.name}`;if((state.planned[code]||cur)===p.id)o.selected=true;sel.appendChild(o)});
-   sel.onchange=()=>state.planned[code]=sel.value;row.appendChild(sel);
+   // empty option first
+   let emptyOpt = document.createElement('option'); emptyOpt.value=''; emptyOpt.textContent='— Empty —'; sel.appendChild(emptyOpt);
+   // Default to empty (do not pre-select current lineup) unless the user has explicitly planned someone
+   const plannedOrCur = (state.planned[code] !== undefined && state.planned[code] !== null) ? state.planned[code] : '';
+   state.players.forEach(p=>{
+     let o=document.createElement("option");o.value=p.id;o.textContent=`#${p.num} ${p.name}`;
+     // mark selected if plannedOrCur matches id, number, or name
+     if(String(plannedOrCur) === String(p.id) || String(plannedOrCur) === String(p.num) || plannedOrCur === p.name) o.selected = true;
+     sel.appendChild(o);
+   });
+   sel.onchange=()=>{state.planned[code]=sel.value||null;};
+   row.appendChild(sel);
    let c=document.createElement("span");c.className="small";c.textContent=cur?pname(cur):"Empty";row.appendChild(c);g.appendChild(row);
  });
 }
 function applySubs(){
- let old={...state.lineup};Object.keys(state.lineup).forEach(k=>{if(state.lineup[k]){let p=state.players.find(x=>x.id===state.lineup[k]);if(p)closeSegment(p);p.activePos=null}});
- let newLine={};Object.entries(state.planned).forEach(([k,id])=>{if(id)newLine[k]=id});
- state.lineup={};Object.entries(newLine).forEach(([k,id])=>{if(Object.values(state.lineup).includes(id))return;state.lineup[k]=id;let p=state.players.find(x=>x.id===id);if(p){p.activePos=k==="M"?"MID":k.startsWith("D")?"DEF":k==="GK"?"GK":"FWD";startSegment(p,p.activePos)}});
+ let old={...state.lineup};
+ Object.keys(state.lineup).forEach(k=>{if(state.lineup[k]){let p=state.players.find(x=>x.id===state.lineup[k]);if(p)closeSegment(p); if(p) p.activePos=null}});
+ let newLine={};
+ Object.entries(state.planned).forEach(([k,id])=>{if(id) newLine[k]=id});
+ state.lineup={};
+ const used=new Set();
+ Object.entries(newLine).forEach(([k,id])=>{
+   // Normalize id same as assign()
+   let target = state.players.find(p=>p.id===id || String(p.num)===String(id) || p.name===id);
+   if(!target){ console.warn('applySubs: planned id not found',k,id); return; }
+   id = target.id;
+   if(used.has(id)){
+     // already assigned to another slot — skip this one
+     console.warn('applySubs: duplicate selection skipped for',id);
+     return;
+   }
+   used.add(id);
+   state.lineup[k]=id;
+   let p=state.players.find(x=>x.id===id);
+   if(p){p.activePos=k==="M"?"MID":k.startsWith("D")?"DEF":k==="GK"?"GK":"FWD";startSegment(p,p.activePos)}
+ });
  record("substitution","",Object.keys(state.lineup).map(k=>`${POS.find(x=>x[0]===k)[1]}:${pname(state.lineup[k])}`).join(", "));
  save();
  render();
@@ -224,32 +345,229 @@ function renderReport(){
  document.getElementById("eventCount").textContent=state.events.length;
  document.getElementById("reportTime").textContent=`${state.half===1?"1st":"2nd"} Half · ${fmt(elapsed())} elapsed`;
  let body=document.getElementById("reportBody");body.innerHTML="";
- state.players.forEach(p=>{let x=playerSeconds(p);let tr=document.createElement("tr");tr.innerHTML=`<td>#${p.num} ${p.name}</td><td>${fmt(x.total)}</td><td>${fmt(x.by.GK)}</td><td>${fmt(x.by.DEF)}</td><td>${fmt(x.by.MID)}</td><td>${fmt(x.by.FWD)}</td><td>${p.goals}</td><td>${p.assists}</td>`;body.appendChild(tr)});
+ state.players.forEach(p=>{let x=playerSeconds(p);let stats=getPlayerStats(p.id);let tr=document.createElement("tr");tr.innerHTML=`<td>#${p.num} ${p.name}</td><td>${fmt(x.total)}</td><td>${fmt(x.by.GK)}</td><td>${fmt(x.by.DEF)}</td><td>${fmt(x.by.MID)}</td><td>${fmt(x.by.FWD)}</td><td>${stats.goals}</td><td>${stats.assists}</td>`;body.appendChild(tr)});
  let tl=document.getElementById("timeline");tl.innerHTML=state.events.map(e=>`<div><b>${e.half===1?"1st":"2nd"} ${fmt(e.t)}</b> — ${e.type}${e.id?" · "+pname(e.id):""}${e.pos?" · "+e.pos:""}</div>`).join("");
 }
 function renderTeam(){
- let ed=document.getElementById("teamEditor");ed.innerHTML="";
- state.players.forEach((p,i)=>{let row=document.createElement("div");row.className="row";row.innerHTML=`<input value="${p.num}" inputmode="numeric" aria-label="Number"><input value="${p.name}" aria-label="Name"><button class="danger">Remove</button>`;row.children[0].onchange=e=>{p.num=e.target.value;render()};row.children[1].onchange=e=>{p.name=e.target.value;render()};row.children[2].onclick=()=>{if(confirm("Remove player?")){state.players.splice(i,1);render()}};ed.appendChild(row)});
- let add=document.createElement("button");add.className="secondary";add.textContent="+ Add Player";add.onclick=()=>{state.players.push({id:"p"+Date.now(),name:"New Player",num:state.players.length+1,goals:0,assists:0,segments:[],activePos:null});render()};ed.appendChild(add);
+  let ed=document.getElementById("teamEditor"); ed.innerHTML = "";
+  state.players.forEach((p,i)=>{
+    let row = document.createElement("div");
+    row.className = "row";
+
+    let numIn = document.createElement("input");
+    numIn.setAttribute("inputmode","numeric");
+    numIn.setAttribute("aria-label","Number");
+    numIn.value = p.num;
+  numIn.addEventListener('focus', ()=>{ editingTeam = true; });
+  numIn.addEventListener('blur', ()=>{ editingTeam = false; p.num = isNaN(Number(numIn.value)) ? numIn.value : Number(numIn.value); render(); });
+  numIn.addEventListener('input', e => { p.num = isNaN(Number(e.target.value)) ? e.target.value : Number(e.target.value); });
+  numIn.addEventListener('keydown', e => { if(e.key==='Enter'){ numIn.blur(); } });
+
+  let nameIn = document.createElement("input");
+  nameIn.setAttribute("aria-label","Name");
+  nameIn.value = p.name;
+  nameIn.addEventListener('focus', ()=>{ editingTeam = true; });
+  nameIn.addEventListener('blur', ()=>{ editingTeam = false; p.name = nameIn.value; render(); });
+  nameIn.addEventListener('input', e => { p.name = e.target.value; });
+  nameIn.addEventListener('keydown', e => { if(e.key==='Enter'){ nameIn.blur(); } });
+
+  let removeBtn = document.createElement("button");
+  removeBtn.className = "danger";
+  removeBtn.textContent = "Remove";
+  removeBtn.addEventListener('click', ()=>{
+    if(confirm("Remove player?")){
+      const idx = state.players.findIndex(x=>x.id===p.id);
+      if(idx !== -1) state.players.splice(idx,1);
+      render();
+    }
+  });
+
+  row.appendChild(numIn);
+  row.appendChild(nameIn);
+  row.appendChild(removeBtn);
+  ed.appendChild(row);
+  });
+
+  let add = document.createElement("button");
+  add.className = "secondary";
+  add.textContent = "+ Add Player";
+  add.addEventListener('click', ()=>{ state.players.push({id: "p"+Date.now(), name: "New Player", num: state.players.length+1, goals:0, assists:0, segments:[], activePos:null}); render(); });
+  ed.appendChild(add);
 }
-function tick(){if(!state.running)return;let now=Date.now();let d=Math.floor((now-lastTick)/1000);if(d>0){state.remaining=Math.max(0,state.remaining-d);lastTick=now;if(state.remaining===0){state.running=false;clearInterval(timer);alert(`${state.half===1?"1st":"2nd"} half is over.`)}save();render()}}
-document.getElementById("startBtn").onclick=()=>{if(!state.running){state.running=true;lastTick=Date.now();save();timer=setInterval(tick,250)}};
-document.getElementById("pauseBtn").onclick=()=>{state.running=false;clearInterval(timer);save();render()};
-document.getElementById("resetBtn").onclick=()=>{state.running=false;clearInterval(timer);state.remaining=1500;save();render()};
-document.getElementById("halfBtn").onclick=()=>{
- if(state.half===1){state.running=false;clearInterval(timer);state.players.forEach(closeSegment);state.half=2;state.remaining=1500;Object.values(state.lineup).forEach(id=>{let p=state.players.find(x=>x.id===id);if(p)startSegment(p,p.activePos)})}
- else alert("Already in 2nd half.");
+function tick(){
+  if(!state.running) return;
+  let now = Date.now();
+  let d = Math.floor((now - lastTick) / 1000);
+  if(d>0){
+    // advance the clock by whole seconds and keep lastTick moving forward
+    lastTick = now;
+    if(state.remaining > 0){
+      state.remaining = Math.max(0, state.remaining - d);
+      if(state.remaining === 0){
+        // Enter overtime (do not stop the clock). Reset overtime counter if missing.
+        state.overtime = state.overtime || 0;
+        // Do not stop timer so it can count up into overtime.
+      }
+    } else {
+      // already in overtime — count up
+      state.overtime = (state.overtime || 0) + d;
+    }
+    save();
+    render();
+  }
+}
+document.getElementById("startBtn").onclick=()=>{ensureStateDefaults(); if(!state.running){state.running=true;lastTick=Date.now();save();timer=setInterval(tick,250)}};
+document.getElementById("pauseBtn").onclick=()=>{ensureStateDefaults(); state.running=false;clearInterval(timer);save();render()};
+document.getElementById("resetBtn").onclick=()=>{ensureStateDefaults(); state.running=false;clearInterval(timer);state.remaining=state.periodSeconds;state.overtime=0;save();render()};
+document.getElementById("halfBtn").onclick=()=>{ensureStateDefaults();
+ if((state.half||1) < (state.periods||2)){
+   state.running=false;clearInterval(timer);state.players.forEach(closeSegment);
+   state.half = (state.half||1) + 1;
+   state.remaining = state.periodSeconds;
+   state.overtime = 0;
+   Object.values(state.lineup).forEach(id=>{let p=state.players.find(x=>x.id===id);if(p)startSegment(p,p.activePos)})
+ } else {
+   alert('Already in the final period.');
+ }
  save();
  render();
 };
+document.getElementById("newGameBtn").onclick=()=>{if(confirm("Reset and start a new game? This will clear all data for this game and cannot be undone.")){clearInterval(timer);
+    // Preserve the current roster (names/numbers) across new games, but clear per-game stats
+    const preservedPlayers = (state && Array.isArray(state.players) && state.players.length>0)
+      ? state.players.map((p,i)=>({id: p.id || ("p"+i+"-"+Date.now()), name: p.name || defaultPlayers[i] || `Player ${i+1}`, num: p.num || i+1, goals:0, assists:0, segments:[], activePos:null}))
+      : defaultPlayers.map((name,i)=>({id: "p"+i, name, num: i+1, goals:0, assists:0, segments:[], activePos:null}));
+    state = { players: preservedPlayers, lineup: {}, planned: {}, half: 1, periods: state.periods||2, periodSeconds: state.periodSeconds||1500, remaining: state.periodSeconds||1500, overtime: 0, running: false, events: [] };
+    ensureStateDefaults();
+    save();
+    render();
+    alert("New game created. Team roster preserved.");
+  }};
 document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.querySelectorAll(".tabpane").forEach(x=>x.classList.add("hidden"));document.getElementById(b.dataset.tab).classList.remove("hidden")});
 document.getElementById("applySubs").onclick=applySubs;
-document.getElementById("saveTeam").onclick=()=>{save();alert("Team saved and synced to all devices.")};
+document.getElementById("saveTeam").onclick=()=>{
+  // Read current inputs in the team editor and persist their values into state before saving.
+  try{
+    const editor = document.getElementById('teamEditor');
+    if(editor){
+      const rows = Array.from(editor.querySelectorAll('.row'));
+      rows.forEach((row,i)=>{
+        const inputs = row.querySelectorAll('input');
+        if(inputs.length>=2){
+          const num = inputs[0].value;
+          const name = inputs[1].value;
+          if(state.players[i]){
+            state.players[i].num = isNaN(Number(num)) ? num : Number(num);
+            state.players[i].name = name;
+          } else {
+            state.players[i] = { id: 'p'+Date.now()+i, num: isNaN(Number(num))?num:Number(num), name, goals:0, assists:0, segments:[], activePos:null };
+          }
+        }
+      });
+    }
+  }catch(e){console.error('SaveTeam error reading inputs',e)}
+  save();
+  alert('Team saved and synced to all devices.');
+};
+
+// Roster persistence functions (saved under /rosters in Firebase)
+async function saveRoster(){
+  ensureStateDefaults();
+  const name = prompt('Roster name to save:');
+  if(!name) return;
+  try{
+    const payload = { name: name, players: state.players.map(p=>({id:p.id,name:p.name,num:p.num})), created: Date.now() };
+    await db.ref('rosters').push(payload);
+    alert('Roster saved to database.');
+  }catch(e){console.error('saveRoster error',e);alert('Failed to save roster');}
+}
+
+async function fetchRosters(){
+  try{
+    const snap = await db.ref('rosters').once('value');
+    return snap.val()||{};
+  }catch(e){console.error('fetchRosters error',e);return {};}
+}
+
+async function showRosterModal(){
+  const modal = document.getElementById('rosterModal');
+  const list = document.getElementById('rosterList');
+  list.innerHTML='Loading...';
+  modal.classList.remove('hidden');
+  const rosters = await fetchRosters();
+  list.innerHTML='';
+  Object.entries(rosters).forEach(([key,obj])=>{
+    const row = document.createElement('div');
+    row.style.display='flex'; row.style.justifyContent='space-between'; row.style.alignItems='center'; row.style.marginBottom='6px';
+    const label = document.createElement('div'); label.textContent = obj.name + ' — ' + (new Date(obj.created||0)).toLocaleString();
+    const actions = document.createElement('div'); actions.style.display='flex'; actions.style.gap='6px';
+    const loadBtn = document.createElement('button'); loadBtn.className='primary'; loadBtn.textContent='Load'; loadBtn.addEventListener('click',()=>loadRosterByKey(key));
+    const delBtn = document.createElement('button'); delBtn.className='danger'; delBtn.textContent='Delete'; delBtn.addEventListener('click',()=>deleteRosterByKey(key));
+    actions.appendChild(loadBtn); actions.appendChild(delBtn);
+    row.appendChild(label); row.appendChild(actions);
+    list.appendChild(row);
+  });
+}
+
+async function loadRosterByKey(key){
+  try{
+    const snap = await db.ref('rosters/'+key).once('value');
+    const obj = snap.val();
+    if(!obj||!obj.players) { alert('Roster data invalid'); return; }
+    // Replace current roster but keep per-game state cleared
+    state.players = obj.players.map((p,i)=>({ id: p.id || ('p'+i+'-'+Date.now()), name: p.name || ('Player '+(i+1)), num: p.num || (i+1), goals:0, assists:0, segments:[], activePos:null }));
+    ensureStateDefaults();
+    save();
+    render();
+    document.getElementById('rosterModal').classList.add('hidden');
+  }catch(e){console.error('loadRoster error',e);alert('Failed to load roster')}
+}
+
+async function deleteRosterByKey(key){
+  if(!confirm('Delete this roster? This cannot be undone.')) return;
+  try{
+    await db.ref('rosters/'+key).remove();
+    alert('Roster deleted');
+    showRosterModal();
+  }catch(e){console.error('deleteRoster error',e);alert('Failed to delete roster')}
+}
+
+// Wire roster modal close
+document.getElementById('closeRosterModal').onclick = ()=>document.getElementById('rosterModal').classList.add('hidden');
+document.getElementById('rosterModal').onclick = e=>{ if(e.target.id==='rosterModal') document.getElementById('rosterModal').classList.add('hidden'); };
+
+// Wire roster buttons
+const srBtn = document.getElementById('saveRosterBtn'); if(srBtn) srBtn.addEventListener('click',saveRoster);
+const lrBtn = document.getElementById('loadRosterBtn'); if(lrBtn) lrBtn.addEventListener('click',showRosterModal);
+
+// Wire time preset control
+const tp = document.getElementById('timePreset');
+if(tp){
+  // set current value based on state
+  function applyPresetToSelect(){
+    if(!state) return;
+    if(state.periods===4 && state.periodSeconds===12*60) tp.value='6-7';
+    else if(state.periods===2 && state.periodSeconds===25*60) tp.value='8-9';
+    else if(state.periods===2 && state.periodSeconds===30*60) tp.value='10-11';
+    else tp.value='8-9';
+  }
+  applyPresetToSelect();
+  tp.addEventListener('change', ()=>{
+    const v=tp.value;
+    if(v==='6-7'){ state.periods=4; state.periodSeconds=12*60; }
+    else if(v==='8-9'){ state.periods=2; state.periodSeconds=25*60; }
+    else if(v==='10-11'){ state.periods=2; state.periodSeconds=30*60; }
+    // reset match timing
+    state.half=1; state.remaining=state.periodSeconds; state.overtime=0; save(); render();
+  });
+}
+
+// existing handlers
 document.getElementById("exportBtn").onclick=()=>{let blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});let a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="soccer-game.json";a.click();URL.revokeObjectURL(a.href)};
 document.getElementById("importBtn").onclick=()=>document.getElementById("importFile").click();
-document.getElementById("importFile").onchange=e=>{let file=e.target.files[0];if(!file)return;let r=new FileReader();r.onload=()=>{try{state=JSON.parse(r.result);save();alert("Game imported and synced to all devices.")}catch{alert("Invalid game file.")}};r.readAsText(file)};
-document.getElementById("goalBtn").onclick=()=>{if(currentPlayer){currentPlayer.goals++;record("goal",currentPlayer.id,currentPos);save();closePlayerModal()}};
-document.getElementById("assistBtn").onclick=()=>{if(currentPlayer){currentPlayer.assists++;record("assist",currentPlayer.id,currentPos);save();closePlayerModal()}};
+document.getElementById("importFile").onchange=e=>{let file=e.target.files[0];if(!file)return;let r=new FileReader();r.onload=()=>{try{state=JSON.parse(r.result);ensureStateDefaults();save();render();alert("Game imported and synced to all devices.")}catch{alert("Invalid game file.")}};r.readAsText(file)};
+document.getElementById("goalBtn").onclick=()=>{if(currentPlayer){ensureStateDefaults(); record("goal",currentPlayer.id,currentPos); save(); closePlayerModal(); render();}};
+document.getElementById("assistBtn").onclick=()=>{if(currentPlayer){ensureStateDefaults(); record("assist",currentPlayer.id,currentPos); save(); closePlayerModal(); render();}};
 document.getElementById("cancelBtn").onclick=closePlayerModal;
 document.getElementById("playerModal").onclick=e=>{if(e.target.id==="playerModal")closePlayerModal()};
 initState();
