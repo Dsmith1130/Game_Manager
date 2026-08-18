@@ -79,8 +79,11 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}th,td{padding:7px;bor
   </section>
 
   <section id="subs" class="tabpane hidden">
-    <div class="panel"><h2>Next Rotation</h2><div class="small">Choose who should occupy each position next, then apply the lineup.</div><div id="subGrid"></div>
-    <button class="primary" id="applySubs">Set Next Lineup</button></div>
+    <div class="panel"><h2>Next Rotation</h2><div class="small">Choose the pending lineup below, then save or apply it when ready.</div><div id="subGrid"></div>
+    <div class="controls" style="margin-top:10px">
+      <button class="secondary" id="saveSubs">Save Next Lineup</button>
+      <button class="primary" id="applySubs">Apply Next Lineup</button>
+    </div></div>
   </section>
 
   <section id="report" class="tabpane hidden">
@@ -354,6 +357,16 @@ function renderSubs(){
    let c=document.createElement("span");c.className="small";c.textContent=cur?pname(cur):"Empty";row.appendChild(c);g.appendChild(row);
  });
 }
+function saveSubs(){
+  const grid = document.getElementById('subGrid');
+  if(grid){
+    Array.from(grid.querySelectorAll('select[data-pos]')).forEach(sel => {
+      state.planned[sel.dataset.pos] = sel.value || null;
+    });
+  }
+  save();
+  render();
+}
 function applySubs(){
  let old={...state.lineup};
  Object.keys(state.lineup).forEach(k=>{if(state.lineup[k]){let p=state.players.find(x=>x.id===state.lineup[k]);if(p)closeSegment(p); if(p) p.activePos=null}});
@@ -488,6 +501,7 @@ document.getElementById("newGameBtn").onclick=()=>{if(confirm("Reset and start a
     alert("New game created. Team roster preserved.");
   }};
 document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.querySelectorAll(".tabpane").forEach(x=>x.classList.add("hidden"));document.getElementById(b.dataset.tab).classList.remove("hidden")});
+document.getElementById("saveSubs").onclick=saveSubs;
 document.getElementById("applySubs").onclick=applySubs;
 document.getElementById("saveTeam").onclick=()=>{
   // Read current inputs in the team editor and persist their values into state before saving.
