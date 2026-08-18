@@ -109,6 +109,8 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}th,td{padding:7px;bor
     <div class="modal-buttons">
       <button id="goalBtn" class="primary">⚽ Add Goal</button>
       <button id="assistBtn" class="secondary">👟 Add Assist</button>
+      <button id="swapBtn" class="secondary">🔄 Swap Player</button>
+      <button id="removeBtn" class="danger">🗑 Remove from Position</button>
       <button id="cancelBtn" class="secondary">Cancel</button>
     </div>
   </div>
@@ -194,13 +196,32 @@ function periodLabel(n, total){
   return `Period ${n}`;
 }
 const pname=id=>{let p=state.players.find(x=>x.id===id);return p?`#${p.num} ${p.name}`:"—"};
-function showPlayerModal(p){
+function normalizePositionKey(pos){
+  if(pos==null) return null;
+  const key = String(pos);
+  if(state.lineup && Object.prototype.hasOwnProperty.call(state.lineup, key)) return key;
+  const match = POS.find(([slot,label]) => slot === key || label === key);
+  return match ? match[0] : key;
+}
+function showPlayerModal(p,pos){
+ currentPlayer = p;
+ currentPos = normalizePositionKey(pos);
  document.getElementById("modalTitle").textContent=`${p.num} ${p.name}`;
  document.getElementById("playerModal").classList.remove("hidden");
 }
 function closePlayerModal(){
  document.getElementById("playerModal").classList.add("hidden");
  currentPlayer=null;currentPos=null;
+}
+function removePlayerFromPosition(pos){
+  const slot = normalizePositionKey(pos);
+  if(!slot || !state.lineup || !state.lineup[slot]) return false;
+  const pid = state.lineup[slot];
+  const p = state.players.find(x=>x.id===pid);
+  if(p){ closeSegment(p); p.activePos = null; }
+  delete state.lineup[slot];
+  if(state.planned && state.planned[slot] === pid) delete state.planned[slot];
+  return true;
 }
 function render(){
  ensureStateDefaults();
@@ -222,14 +243,16 @@ function getPlayerStats(id){
  return {goals,assists};
 }
 
-function playerCard(p, pos, active=false){
+function playerCard(p, slotCode, displayLabel, active=false){
  let stats = getPlayerStats(p.id);
- let d=document.createElement("div");d.className="player"+(active?" active":"");d.draggable=true;d.dataset.id=p.id;
- d.innerHTML=`<div class="num">#${p.num} ${p.name}</div><div class="stat">${pos||p.activePos||"Bench"}</div><div class="stat">⚽ ${stats.goals} · 👟 ${stats.assists}</div>`;
+ const slot = slotCode || p.activePos || "";
+ const label = displayLabel || slot || "Bench";
+ let d=document.createElement("div");d.className="player"+(active?" active":"");d.draggable=true;d.dataset.id=p.id;d.dataset.slot=slot;
+ d.innerHTML=`<div class="num">#${p.num} ${p.name}</div><div class="stat">${label}</div><div class="stat">⚽ ${stats.goals} · 👟 ${stats.assists}</div>`;
  d.addEventListener("dragstart",e=>e.dataTransfer.setData("text/plain",p.id));
  d.addEventListener("click",e=>{
    if(e.target.closest("button"))return;
-   if(active){currentPlayer=p;currentPos=pos;showPlayerModal(p)}
+   if(active){showPlayerModal(p, slot)}
  });
  return d;
 }
@@ -241,7 +264,7 @@ function renderField(){
    // Try to find the player by id, or fallback to matching by number or name if necessary
    let p=state.players.find(x=>x.id===id) || state.players.find(x=>String(x.num)===String(id)) || state.players.find(x=>x.name===id);
    s.innerHTML="";
-   if(p) s.appendChild(playerCard(p,label,true)); else { s.innerHTML=`<div class="empty">${label}<br>Drop player</div>` }
+   if(p) s.appendChild(playerCard(p, code, label, true)); else { s.innerHTML=`<div class="empty">${label}<br>Drop player</div>` }
    s.addEventListener("dragover",e=>e.preventDefault());
    s.addEventListener("drop",e=>{e.preventDefault();assign(code,e.dataTransfer.getData("text/plain"));});
    s.addEventListener("click",e=>{
@@ -257,6 +280,11 @@ function assign(pos,id){
  // Normalize id: tolerate numeric ids or numbers by matching player.num or name.
  let target = state.players.find(p=>p.id===id || String(p.num)===String(id) || p.name===id);
  if(target) id = target.id;
+ const previousInSlot = state.lineup[pos];
+ if(previousInSlot && previousInSlot !== id){
+   const previousPlayer = state.players.find(p=>p.id===previousInSlot);
+   if(previousPlayer){ closeSegment(previousPlayer); previousPlayer.activePos = null; }
+ }
  Object.keys(state.lineup).forEach(k=>{if(state.lineup[k]===id)delete state.lineup[k]});
  let old=state.players.find(p=>p.id===id)?.activePos;
  if(old===pos)return;
@@ -580,38 +608,38 @@ if(tp){
 
 // existing handlers
 // Player chooser modal handlers
-function showChooseModal(pos){
+function showChooseModal(pos, mode='assign'){
   ensureStateDefaults();
   currentPos = pos;
   const modal = document.getElementById('choosePlayerModal');
   const list = document.getElementById('chooseList');
+  const title = document.getElementById('chooseTitle');
+  title.textContent = mode === 'swap' ? 'Swap player in position' : 'Assign player to position';
   list.innerHTML = '';
+  const currentId = state.lineup[pos];
   // Option to remove/unassign currently assigned player
-  const unassignRow = document.createElement('div');
-  unassignRow.style.marginBottom = '8px';
-  const unassignBtn = document.createElement('button');
-  unassignBtn.className = 'secondary';
-  unassignBtn.style.width = '100%';
-  unassignBtn.textContent = 'Remove player from position';
-  unassignBtn.addEventListener('click', ()=>{
-    if(state.lineup && state.lineup[pos]){
-      const pid = state.lineup[pos];
-      const p = state.players.find(x=>x.id===pid);
-      if(p) closeSegment(p);
-      delete state.lineup[pos];
-      save(); render();
-    }
-    closeChooseModal();
-  });
-  unassignRow.appendChild(unassignBtn);
-  list.appendChild(unassignRow);
+  if(currentId){
+    const unassignRow = document.createElement('div');
+    unassignRow.style.marginBottom = '8px';
+    const unassignBtn = document.createElement('button');
+    unassignBtn.className = 'secondary';
+    unassignBtn.style.width = '100%';
+    unassignBtn.textContent = 'Remove player from position';
+    unassignBtn.addEventListener('click', ()=>{
+      if(removePlayerFromPosition(pos)){ save(); render(); }
+      closeChooseModal();
+    });
+    unassignRow.appendChild(unassignBtn);
+    list.appendChild(unassignRow);
+  }
 
-  // List available players (not already assigned)
-  state.players.filter(p=>!Object.values(state.lineup).includes(p.id)).forEach(p=>{
+  // List available players (not already assigned), plus the current player when swapping.
+  const available = state.players.filter(p=>(!Object.values(state.lineup).includes(p.id)) || p.id === currentId);
+  available.forEach(p=>{
     const row = document.createElement('div');
     row.style.display='flex'; row.style.justifyContent='space-between'; row.style.alignItems='center'; row.style.marginBottom='6px';
     const label = document.createElement('div'); label.textContent = '#'+p.num+' '+p.name;
-    const btn = document.createElement('button'); btn.className='primary'; btn.textContent='Assign';
+    const btn = document.createElement('button'); btn.className='primary'; btn.textContent = mode === 'swap' ? 'Swap in' : 'Assign';
     btn.addEventListener('click', ()=>{ assign(pos,p.id); closeChooseModal(); });
     row.appendChild(label); row.appendChild(btn); list.appendChild(row);
   });
@@ -643,8 +671,10 @@ document.getElementById("endGameBtn").onclick = ()=>{
 document.getElementById("exportBtn").onclick=()=>{let blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});let a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="soccer-game.json";a.click();URL.revokeObjectURL(a.href)};
 document.getElementById("importBtn").onclick=()=>document.getElementById("importFile").click();
 document.getElementById("importFile").onchange=e=>{let file=e.target.files[0];if(!file)return;let r=new FileReader();r.onload=()=>{try{state=JSON.parse(r.result);ensureStateDefaults();save();render();alert("Game imported and synced to all devices.")}catch{alert("Invalid game file.")}};r.readAsText(file)};
-document.getElementById("goalBtn").onclick=()=>{if(currentPlayer){ensureStateDefaults(); record("goal",currentPlayer.id,currentPos); save(); closePlayerModal(); render();}};
-document.getElementById("assistBtn").onclick=()=>{if(currentPlayer){ensureStateDefaults(); record("assist",currentPlayer.id,currentPos); save(); closePlayerModal(); render();}};
+document.getElementById("goalBtn").onclick=()=>{const slot = normalizePositionKey(currentPos); if(currentPlayer && slot){ensureStateDefaults(); record("goal",currentPlayer.id,slot); save(); closePlayerModal(); render();}};
+document.getElementById("assistBtn").onclick=()=>{const slot = normalizePositionKey(currentPos); if(currentPlayer && slot){ensureStateDefaults(); record("assist",currentPlayer.id,slot); save(); closePlayerModal(); render();}};
+document.getElementById("swapBtn").onclick=()=>{const slot = normalizePositionKey(currentPos); if(slot){ closePlayerModal(); showChooseModal(slot,'swap'); }};
+document.getElementById("removeBtn").onclick=()=>{const slot = normalizePositionKey(currentPos); if(slot && removePlayerFromPosition(slot)){ save(); closePlayerModal(); render(); }};
 document.getElementById("cancelBtn").onclick=closePlayerModal;
 document.getElementById("playerModal").onclick=e=>{if(e.target.id==="playerModal")closePlayerModal()};
 initState();
