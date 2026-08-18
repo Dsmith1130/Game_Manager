@@ -21,6 +21,7 @@ h1{font-size:1.25rem;margin:0}.clock{font-size:2rem;font-variant-numeric:tabular
   .controls button{padding:6px 8px;font-size:0.85rem;border-radius:8px}
   .tabs{overflow:auto}
   #live{grid-template-columns:1fr}
+  #bench{display:none}
 }
 .field-wrap{display:flex;justify-content:center}.field{position:relative;width:min(900px,100%);aspect-ratio:0.75;background:#258548;border-radius:12px;overflow:hidden;border:3px solid white;box-shadow:0 2px 10px #0003}
 .field:before{content:"";position:absolute;left:0;right:0;top:50%;height:2px;background:#fff;transform:translateY(-50%)}
@@ -60,6 +61,7 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}th,td{padding:7px;bor
             <option value="10-11">10-11 (2×30m)</option>
             <option value="6-7">6-7 (4×12m)</option>
           </select>
+          <button class="danger" id="endGameBtn">🏁 End Game</button>
           <button class="danger" id="newGameBtn">🆕 New Game</button>
         </div>
   </div>
@@ -109,6 +111,15 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}th,td{padding:7px;bor
       <button id="assistBtn" class="secondary">👟 Add Assist</button>
       <button id="cancelBtn" class="secondary">Cancel</button>
     </div>
+  </div>
+</div>
+
+<!-- Modal for assigning/tapping a position on touch devices -->
+<div id="choosePlayerModal" class="modal hidden">
+  <div class="modal-content">
+    <h3 id="chooseTitle">Assign player to position</h3>
+    <div id="chooseList" class="small" style="max-height:300px;overflow:auto;margin-top:8px"></div>
+    <div style="display:flex;gap:8px;margin-top:10px"><button id="chooseCancel" class="secondary">Cancel</button></div>
   </div>
 </div>
 
@@ -233,6 +244,11 @@ function renderField(){
    if(p) s.appendChild(playerCard(p,label,true)); else { s.innerHTML=`<div class="empty">${label}<br>Drop player</div>` }
    s.addEventListener("dragover",e=>e.preventDefault());
    s.addEventListener("drop",e=>{e.preventDefault();assign(code,e.dataTransfer.getData("text/plain"));});
+   s.addEventListener("click",e=>{
+     // If user clicked the player tile inside the slot, let that click handler open the stats modal
+     if(e.target.closest && e.target.closest('.player')) return;
+     showChooseModal(code);
+   });
    f.appendChild(s);
  });
 }
@@ -563,6 +579,67 @@ if(tp){
 }
 
 // existing handlers
+// Player chooser modal handlers
+function showChooseModal(pos){
+  ensureStateDefaults();
+  currentPos = pos;
+  const modal = document.getElementById('choosePlayerModal');
+  const list = document.getElementById('chooseList');
+  list.innerHTML = '';
+  // Option to remove/unassign currently assigned player
+  const unassignRow = document.createElement('div');
+  unassignRow.style.marginBottom = '8px';
+  const unassignBtn = document.createElement('button');
+  unassignBtn.className = 'secondary';
+  unassignBtn.style.width = '100%';
+  unassignBtn.textContent = 'Remove player from position';
+  unassignBtn.addEventListener('click', ()=>{
+    if(state.lineup && state.lineup[pos]){
+      const pid = state.lineup[pos];
+      const p = state.players.find(x=>x.id===pid);
+      if(p) closeSegment(p);
+      delete state.lineup[pos];
+      save(); render();
+    }
+    closeChooseModal();
+  });
+  unassignRow.appendChild(unassignBtn);
+  list.appendChild(unassignRow);
+
+  // List available players (not already assigned)
+  state.players.filter(p=>!Object.values(state.lineup).includes(p.id)).forEach(p=>{
+    const row = document.createElement('div');
+    row.style.display='flex'; row.style.justifyContent='space-between'; row.style.alignItems='center'; row.style.marginBottom='6px';
+    const label = document.createElement('div'); label.textContent = '#'+p.num+' '+p.name;
+    const btn = document.createElement('button'); btn.className='primary'; btn.textContent='Assign';
+    btn.addEventListener('click', ()=>{ assign(pos,p.id); closeChooseModal(); });
+    row.appendChild(label); row.appendChild(btn); list.appendChild(row);
+  });
+  modal.classList.remove('hidden');
+}
+function closeChooseModal(){ document.getElementById('choosePlayerModal').classList.add('hidden'); currentPos=null; }
+// wire chooser modal cancel and backdrop
+const _chooseCancel = document.getElementById('chooseCancel'); if(_chooseCancel) _chooseCancel.onclick = closeChooseModal;
+const _chooseModal = document.getElementById('choosePlayerModal'); if(_chooseModal) _chooseModal.onclick = e=>{ if(e.target.id==='choosePlayerModal') closeChooseModal(); };
+
+// End game button: stop timer, finalize segments and download final report (CSV + JSON)
+document.getElementById("endGameBtn").onclick = ()=>{
+  ensureStateDefaults();
+  state.running = false; clearInterval(timer);
+  // close any open segments
+  state.players.forEach(closeSegment);
+  save(); render();
+  // build CSV report
+  const rows = [['Player','Total','GK','DEF','MID','FWD','Goals','Assists']];
+  state.players.forEach(p=>{ const x = playerSeconds(p); const s = getPlayerStats(p.id); rows.push([`#${p.num} ${p.name}`, fmt(x.total), fmt(x.by.GK), fmt(x.by.DEF), fmt(x.by.MID), fmt(x.by.FWD), s.goals, s.assists]); });
+  const csv = rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blobCsv = new Blob([csv],{type:'text/csv'}); const aCsv = document.createElement('a'); aCsv.href = URL.createObjectURL(blobCsv); aCsv.download = 'soccer-game-report.csv'; aCsv.click(); URL.revokeObjectURL(aCsv.href);
+  // also save full game JSON
+  const blobJson = new Blob([JSON.stringify(state,null,2)],{type:'application/json'}); const aJson = document.createElement('a'); aJson.href = URL.createObjectURL(blobJson); aJson.download = 'soccer-game-final.json'; aJson.click(); URL.revokeObjectURL(aJson.href);
+  alert('Game ended and final report downloaded.');
+};
+
+// Existing export button (JSON export)
 document.getElementById("exportBtn").onclick=()=>{let blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});let a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="soccer-game.json";a.click();URL.revokeObjectURL(a.href)};
 document.getElementById("importBtn").onclick=()=>document.getElementById("importFile").click();
 document.getElementById("importFile").onchange=e=>{let file=e.target.files[0];if(!file)return;let r=new FileReader();r.onload=()=>{try{state=JSON.parse(r.result);ensureStateDefaults();save();render();alert("Game imported and synced to all devices.")}catch{alert("Invalid game file.")}};r.readAsText(file)};
