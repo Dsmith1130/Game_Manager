@@ -128,6 +128,16 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}th,td{padding:7px;bor
   </div>
 </div>
 
+<div id="teamSelectModal" class="modal">
+  <div class="modal-content">
+    <h3>Select Team</h3>
+    <div class="small" style="margin-bottom:10px">Choose an existing team or enter a new team name. Each team has its own live game.</div>
+    <select id="teamSelect" style="width:100%;padding:10px;border-radius:8px;margin-bottom:8px"></select>
+    <input id="newTeamName" type="text" placeholder="New team name" aria-label="New team name" style="width:100%;padding:10px;border:1px solid #cbd8cf;border-radius:8px;margin-bottom:10px">
+    <button id="teamContinue" class="primary" style="width:100%">Continue</button>
+  </div>
+</div>
+
 <script src="https://www.gstatic.com/firebasejs/10.7.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.2/firebase-database-compat.js"></script>
 <script>
@@ -141,19 +151,57 @@ firebase.initializeApp(firebaseConfig);
 const db=firebase.database();
 
 let state=null,syncing=false,initialized=false;
+let selectedTeamKey="default",selectedTeamName="Default Team";
 let timer=null,lastTick=Date.now();
+
+function teamPath(){return `teams/${selectedTeamKey}`;}
+function teamStateRef(){return db.ref(`${teamPath()}/gameState`);}
+function teamRosterRef(){return db.ref(`${teamPath()}/rosters`);}
+function defaultGameState(){
+  return {players:defaultPlayers.map((name,i)=>({id:"p"+i,name,num:i+1,goals:0,assists:0,segments:[],activePos:null})),lineup:{},planned:{},half:1,periods:2,periodSeconds:1500,remaining:1500,running:false,lastTickAt:null,events:[]};
+}
+async function chooseTeam(){
+  const modal=document.getElementById("teamSelectModal");
+  const select=document.getElementById("teamSelect");
+  const input=document.getElementById("newTeamName");
+  let teams={};
+  try{
+    const snapshot=await db.ref("teams").once("value");
+    teams=snapshot.val()||{};
+    if(!teams.default && (await db.ref("gameState").once("value")).exists()) teams.default={name:"Default Team"};
+  }catch(e){console.error("Team list error:",e);}
+  select.innerHTML="";
+  Object.entries(teams).forEach(([key,team])=>{
+    const option=document.createElement("option"); option.value=key; option.textContent=team.name||key; select.appendChild(option);
+  });
+  if(!select.options.length){
+    const option=document.createElement("option"); option.value="default"; option.textContent="Default Team"; select.appendChild(option);
+  }
+  return new Promise(resolve=>{
+    document.getElementById("teamContinue").onclick=async()=>{
+      const name=input.value.trim();
+      const key=name ? name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,40) : select.value;
+      if(!key)return;
+      selectedTeamKey=key; selectedTeamName=name||select.options[select.selectedIndex].textContent;
+      await db.ref(`teams/${key}`).update({name:selectedTeamName});
+      modal.classList.add("hidden");
+      resolve();
+    };
+  });
+}
 
 // Load initial state from Firebase
 async function initState(){
  try{
-   const snapshot=await db.ref("gameState").once("value");
-   state=snapshot.val()||{
-     players:defaultPlayers.map((name,i)=>({id:"p"+i,name,num:i+1,goals:0,assists:0,segments:[],activePos:null})),
-     lineup:{}, planned:{}, half:1, periods:2, periodSeconds:1500, remaining:1500, running:false, events:[]
-   };
+   const snapshot=await teamStateRef().once("value");
+   if(snapshot.exists()) state=snapshot.val();
+   else if(selectedTeamKey==="default"){
+     const legacy=await db.ref("gameState").once("value");
+     state=legacy.val()||defaultGameState();
+   }else state=defaultGameState();
    ensureStateDefaults();
    // Listen for real-time updates
-   db.ref("gameState").on("value",snapshot=>{
+   teamStateRef().on("value",snapshot=>{
      const newState=snapshot.val();
      // If the user is actively editing the team roster, avoid overwriting their inputs with remote updates.
      const active = typeof document !== 'undefined' && document.activeElement;
@@ -166,6 +214,8 @@ async function initState(){
      if(newState&&JSON.stringify(newState)!==JSON.stringify(state)){
        state=newState;
        ensureStateDefaults();
+         if(advanceTimer()) save();
+         if(state.running) startTimerLoop(); else stopTimerLoop();
        if(!syncing)render();
      }
    });
@@ -173,8 +223,10 @@ async function initState(){
    render();
  }catch(e){
    console.error("Firebase error:",e);
-   state={players:defaultPlayers.map((name,i)=>({id:"p"+i,name,num:i+1,goals:0,assists:0,segments:[],activePos:null})),lineup:{},planned:{},half:1,periods:2,periodSeconds:1500,remaining:1500,running:false,events:[]};
+   state=defaultGameState();
    ensureStateDefaults();
+  if(advanceTimer()) save();
+  if(state.running) startTimerLoop();
    render();
  }
 }
@@ -183,7 +235,7 @@ const save=async()=>{
  if(!state)return;
  try{
    syncing=true;
-   await db.ref("gameState").set(state);
+  await teamStateRef().set(state);
    syncing=false;
  }catch(e){
    console.error("Save error:",e);
@@ -318,6 +370,7 @@ function ensureStateDefaults(){
   state.periodSeconds = typeof state.periodSeconds === 'number' ? state.periodSeconds : 1500;
   state.remaining = typeof state.remaining === 'number' ? state.remaining : state.periodSeconds;
   state.overtime = typeof state.overtime === 'number' ? state.overtime : 0;
+  state.lastTickAt = typeof state.lastTickAt === 'number' ? state.lastTickAt : null;
   state.running = !!state.running;
   state.players.forEach(p=>{p.segments = p.segments || []; p.goals = p.goals || 0; p.assists = p.assists || 0; if(!('activePos' in p)) p.activePos=null;});
 }
@@ -452,33 +505,37 @@ function renderTeam(){
   ed.appendChild(add);
 }
 function tick(){
-  if(!state.running) return;
-  let now = Date.now();
-  let d = Math.floor((now - lastTick) / 1000);
-  if(d>0){
-    // advance the clock by whole seconds and keep lastTick moving forward
-    lastTick = now;
-    if(state.remaining > 0){
-      state.remaining = Math.max(0, state.remaining - d);
-      if(state.remaining === 0){
-        // Enter overtime (do not stop the clock). Reset overtime counter if missing.
-        state.overtime = state.overtime || 0;
-        // Do not stop timer so it can count up into overtime.
-      }
-    } else {
-      // already in overtime — count up
-      state.overtime = (state.overtime || 0) + d;
-    }
+  if(advanceTimer()){
     save();
     render();
   }
 }
-document.getElementById("startBtn").onclick=()=>{ensureStateDefaults(); if(!state.running){state.running=true;lastTick=Date.now();save();timer=setInterval(tick,250)}};
-document.getElementById("pauseBtn").onclick=()=>{ensureStateDefaults(); state.running=false;clearInterval(timer);save();render()};
-document.getElementById("resetBtn").onclick=()=>{ensureStateDefaults(); state.running=false;clearInterval(timer);state.remaining=state.periodSeconds;state.overtime=0;save();render()};
+function advanceTimer(now=Date.now()){
+  if(!state || !state.running) return false;
+  if(typeof state.lastTickAt !== 'number') state.lastTickAt=now;
+  const seconds=Math.floor((now-state.lastTickAt)/1000);
+  if(seconds<=0) return false;
+  state.lastTickAt += seconds*1000;
+  if(state.remaining>0){
+    const remainingBefore=state.remaining;
+    state.remaining=Math.max(0,remainingBefore-seconds);
+    if(seconds>remainingBefore) state.overtime=(state.overtime||0)+(seconds-remainingBefore);
+  }else state.overtime=(state.overtime||0)+seconds;
+  return true;
+}
+function startTimerLoop(){
+  if(!timer) timer=setInterval(tick,250);
+}
+function stopTimerLoop(){
+  if(timer){clearInterval(timer);timer=null;}
+}
+document.getElementById("startBtn").onclick=()=>{ensureStateDefaults(); if(!state.running){state.running=true;state.lastTickAt=Date.now();save();startTimerLoop();render()}};
+document.getElementById("pauseBtn").onclick=()=>{ensureStateDefaults(); advanceTimer(); state.running=false;state.lastTickAt=null;stopTimerLoop();save();render()};
+document.getElementById("resetBtn").onclick=()=>{ensureStateDefaults(); state.running=false;state.lastTickAt=null;stopTimerLoop();state.remaining=state.periodSeconds;state.overtime=0;save();render()};
 document.getElementById("halfBtn").onclick=()=>{ensureStateDefaults();
  if((state.half||1) < (state.periods||2)){
-   state.running=false;clearInterval(timer);state.players.forEach(closeSegment);
+  advanceTimer();
+  state.running=false;state.lastTickAt=null;stopTimerLoop();state.players.forEach(closeSegment);
    state.half = (state.half||1) + 1;
    state.remaining = state.periodSeconds;
    state.overtime = 0;
@@ -494,7 +551,7 @@ document.getElementById("newGameBtn").onclick=()=>{if(confirm("Reset and start a
     const preservedPlayers = (state && Array.isArray(state.players) && state.players.length>0)
       ? state.players.map((p,i)=>({id: p.id || ("p"+i+"-"+Date.now()), name: p.name || defaultPlayers[i] || `Player ${i+1}`, num: p.num || i+1, goals:0, assists:0, segments:[], activePos:null}))
       : defaultPlayers.map((name,i)=>({id: "p"+i, name, num: i+1, goals:0, assists:0, segments:[], activePos:null}));
-    state = { players: preservedPlayers, lineup: {}, planned: {}, half: 1, periods: state.periods||2, periodSeconds: state.periodSeconds||1500, remaining: state.periodSeconds||1500, overtime: 0, running: false, events: [] };
+    state = { players: preservedPlayers, lineup: {}, planned: {}, half: 1, periods: state.periods||2, periodSeconds: state.periodSeconds||1500, remaining: state.periodSeconds||1500, overtime: 0, running: false, lastTickAt: null, events: [] };
     ensureStateDefaults();
     save();
     render();
@@ -535,14 +592,14 @@ async function saveRoster(){
   if(!name) return;
   try{
     const payload = { name: name, players: state.players.map(p=>({id:p.id,name:p.name,num:p.num})), created: Date.now() };
-    await db.ref('rosters').push(payload);
+    await teamRosterRef().push(payload);
     alert('Roster saved to database.');
   }catch(e){console.error('saveRoster error',e);alert('Failed to save roster');}
 }
 
 async function fetchRosters(){
   try{
-    const snap = await db.ref('rosters').once('value');
+    const snap = await teamRosterRef().once('value');
     return snap.val()||{};
   }catch(e){console.error('fetchRosters error',e);return {};}
 }
@@ -569,7 +626,7 @@ async function showRosterModal(){
 
 async function loadRosterByKey(key){
   try{
-    const snap = await db.ref('rosters/'+key).once('value');
+    const snap = await teamRosterRef().child(key).once('value');
     const obj = snap.val();
     if(!obj||!obj.players) { alert('Roster data invalid'); return; }
     // Replace current roster but keep per-game state cleared
@@ -584,7 +641,7 @@ async function loadRosterByKey(key){
 async function deleteRosterByKey(key){
   if(!confirm('Delete this roster? This cannot be undone.')) return;
   try{
-    await db.ref('rosters/'+key).remove();
+    await teamRosterRef().child(key).remove();
     alert('Roster deleted');
     showRosterModal();
   }catch(e){console.error('deleteRoster error',e);alert('Failed to delete roster')}
@@ -691,7 +748,14 @@ document.getElementById("swapBtn").onclick=()=>{const slot = normalizePositionKe
 document.getElementById("removeBtn").onclick=()=>{const slot = normalizePositionKey(currentPos); if(slot && removePlayerFromPosition(slot)){ save(); closePlayerModal(); render(); }};
 document.getElementById("cancelBtn").onclick=closePlayerModal;
 document.getElementById("playerModal").onclick=e=>{if(e.target.id==="playerModal")closePlayerModal()};
-initState();
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState!=="visible" || !state || !state.running) return;
+  if(advanceTimer()){ save(); render(); }
+});
+window.addEventListener("pageshow",()=>{
+  if(state && state.running && advanceTimer()){ save(); render(); }
+});
+chooseTeam().then(initState);
 </script>
 </body>
 </html>
