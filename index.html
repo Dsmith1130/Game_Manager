@@ -29,7 +29,8 @@ h1{font-size:1.25rem;margin:0}.clock{font-size:2rem;font-variant-numeric:tabular
 .box{position:absolute;border:2px solid white;width:42%;height:18%;left:29%}.box.left{top:0;border-top:0}.box.right{bottom:0;border-bottom:0}
 .slot{position:absolute;transform:translate(-50%,-50%);width:92px;min-height:62px;display:flex;align-items:center;justify-content:center;text-align:center}
 .slot[data-pos="F1"]{left:20%;top:16%}.slot[data-pos="F2"]{left:39%;top:11%}.slot[data-pos="F3"]{left:61%;top:11%}.slot[data-pos="F4"]{left:80%;top:16%}
-.slot[data-pos="M"]{left:50%;top:38%}.slot[data-pos="D1"]{left:25%;top:64%}.slot[data-pos="D2"]{left:50%;top:69%}.slot[data-pos="D3"]{left:75%;top:64%}.slot[data-pos="GK"]{left:50%;top:88%}
+.slot[data-pos="M"]{left:50%;top:38%}.slot[data-pos="M1"]{left:18%;top:38%}.slot[data-pos="M2"]{left:50%;top:38%}.slot[data-pos="M3"]{left:82%;top:38%}
+.slot[data-pos="D1"]{left:25%;top:64%}.slot[data-pos="D2"]{left:50%;top:69%}.slot[data-pos="D3"]{left:75%;top:64%}.slot[data-pos="GK"]{left:50%;top:88%}
 .player{width:86px;min-height:58px;border-radius:12px;background:white;border:2px solid #cbd8cf;box-shadow:0 2px 7px #0003;padding:6px;font-size:.78rem;touch-action:none}
 .player.active{border-color:#ffd166}.player .num{font-weight:900}.player .stat{font-size:.72rem;color:var(--muted)}
 .empty{background:#ffffff33;border:2px dashed #fff;color:white;border-radius:12px;padding:9px;font-size:.75rem}
@@ -141,9 +142,18 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}th,td{padding:7px;bor
 <script src="https://www.gstatic.com/firebasejs/10.7.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.2/firebase-database-compat.js"></script>
 <script>
-const POS=[["F1","FWD"],["F2","FWD"],["F3","FWD"],["F4","FWD"],["M","MID"],["D1","DEF"],["D2","DEF"],["D3","DEF"],["GK","GK"]];
+const BASE_POS=[["F1","FWD"],["F2","FWD"],["F3","FWD"],["F4","FWD"],["M","MID"],["D1","DEF"],["D2","DEF"],["D3","DEF"],["GK","GK"]];
+const PREMIUM_POS=[["F1","FWD"],["F2","FWD"],["F3","FWD"],["F4","FWD"],["M1","MID"],["M2","MID"],["M3","MID"],["D1","DEF"],["D2","DEF"],["D3","DEF"],["GK","GK"]];
+let POS = BASE_POS;
 let currentPlayer=null,currentPos=null;let editingTeam=false; // true while user is editing team inputs
 const defaultPlayers=["Alex","Ben","Charlie","Dylan","Evan","Finn","Gavin","Henry","Isaac","Jack","Kai","Liam","Mason","Noah","Owen","Parker","Quinn","Ryan"];
+
+function getFormationSlots(){
+  if(state && state.periods===2 && state.periodSeconds===30*60){
+    return PREMIUM_POS;
+  }
+  return BASE_POS;
+}
 
 // Firebase Config
 const firebaseConfig={apiKey:"AIzaSyC0-MvOm4aOzZPzGzLp7xwKJ4Y5c8e9f0g",authDomain:"soccergamemanager.firebaseapp.com",databaseURL:"https://soccergamemanager-default-rtdb.firebaseio.com",projectId:"soccergamemanager",storageBucket:"soccergamemanager.appspot.com",messagingSenderId:"123456789",appId:"1:123456789:web:abcdef123456"};
@@ -280,6 +290,7 @@ function removePlayerFromPosition(pos){
 }
 function render(){
  ensureStateDefaults();
+ POS = getFormationSlots();
  // Update time preset select to reflect current state
  const tp = document.getElementById('timePreset');
  if(tp){
@@ -672,6 +683,7 @@ if(tp){
     if(v==='6-7'){ state.periods=4; state.periodSeconds=12*60; }
     else if(v==='8-9'){ state.periods=2; state.periodSeconds=25*60; }
     else if(v==='10-11'){ state.periods=2; state.periodSeconds=30*60; }
+    POS = getFormationSlots();
     // reset match timing
     state.half=1; state.remaining=state.periodSeconds; state.overtime=0; save(); render();
   });
